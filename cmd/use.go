@@ -5,14 +5,13 @@ package cmd
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/fdanctl/envy/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -52,58 +51,62 @@ to quickly create a Cobra application.`,
 			log.Fatal(err)
 		}
 
-		if !yes {
-			// works for now, add gum (Charm.sh) later
-			// more options like output file name
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Printf("A .env file found in this directory. Do you want to replace it? [y/N]: ")
-			response, _ := reader.ReadString('\n')
-			if strings.TrimSpace(strings.ToLower(response)) != "y" {
-				os.Exit(0)
+		if _, err := os.Stat(".env"); err == nil && !yes {
+			options := "\033[33mr - replace\nc - change output name\nq - quit\n? - print help\033[0m"
+			fmt.Print(
+				"\033[31mA .env file found in this directory. What do you want to do?\033[0m\n",
+				options,
+				"\n\n",
+			)
+		loop:
+			for true {
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print("\033[36m\033[1mOption(r,c,q,?):\033[0m ")
+				response, _ := reader.ReadByte()
+
+				switch response {
+				case 'r', 'R':
+					fmt.Println("replace")
+					break loop
+				case 'c', 'C':
+					fmt.Println("change")
+					break loop
+				case 'q', 'Q':
+					fmt.Println("quit")
+					break loop
+				case '?':
+					fmt.Println(options)
+				}
 			}
 		}
 
-		home, err := os.UserHomeDir()
+		path, ok := store.FindPresetByName(preset)
+		if !ok {
+			fmt.Printf("preset '%s' was not found\n", preset[:len(preset)-4])
+			return
+		}
+		f, err := os.Open(path)
 		if err != nil {
-			log.Fatal("err", err)
+			log.Fatal(err)
 		}
+		defer f.Close()
 
-		path := fmt.Sprintf("%s/.config/envy/", home)
-		dir, err := os.ReadDir(path)
+		outFile, err := os.Create(".env")
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				os.MkdirAll(path, 0o755)
-			}
+			log.Fatal(err)
 		}
+		defer outFile.Close()
 
-		for _, v := range dir {
-			if v.Name() == preset {
-				f, err := os.Open(fmt.Sprint(path, v.Name()))
-				if err != nil {
-					log.Fatal(err)
-				}
-				defer f.Close()
-
-				outFile, err := os.Create(".env")
-				if err != nil {
-					log.Fatal(err)
-				}
-				defer outFile.Close()
-
-				_, err = io.Copy(f, outFile)
-				if err != nil {
-					log.Fatal(err)
-				}
-				fmt.Printf("copied %s, to .env\n", preset)
-				return
-			}
+		_, err = io.Copy(f, outFile)
+		if err != nil {
+			log.Fatal(err)
 		}
-
-		fmt.Println("not found")
+		fmt.Printf("copied %s, to .env\n", preset)
 	},
 }
 
 func init() {
+	// TODO (maybe) rename to --force -f
 	useCmd.Flags().BoolP("yes", "y", false, "Replace current .env")
 	rootCmd.AddCommand(useCmd)
 
