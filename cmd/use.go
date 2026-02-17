@@ -59,7 +59,7 @@ to quickly create a Cobra application.`,
 				"\n\n",
 			)
 		loop:
-			for true {
+			for {
 				reader := bufio.NewReader(os.Stdin)
 				fmt.Print("\033[36m\033[1mOption(r,c,q,?):\033[0m ")
 				response, _ := reader.ReadByte()
@@ -85,22 +85,28 @@ to quickly create a Cobra application.`,
 			fmt.Printf("preset '%s' was not found\n", preset[:len(preset)-4])
 			return
 		}
-		f, err := os.Open(path)
+		src, err := os.Open(path)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
+		defer src.Close()
 
-		outFile, err := os.Create(".env")
+		dst, err := os.Create(".env")
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer outFile.Close()
+		defer dst.Close()
 
-		_, err = io.Copy(f, outFile)
-		if err != nil {
+		scanner := bufio.NewScanner(src)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			line = append(line, '\n')
+			io.Writer.Write(dst, line)
+		}
+		if err := scanner.Err(); err != nil {
 			log.Fatal(err)
 		}
+
 		fmt.Printf("copied %s, to .env\n", preset)
 	},
 }
