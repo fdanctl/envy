@@ -80,6 +80,9 @@ to quickly create a Cobra application.`,
 			}
 		}
 
+		// TODO: option to create a link instead of copy
+		// os.Link() for hard links
+
 		path, ok := store.FindPresetByName(preset)
 		if !ok {
 			fmt.Printf("preset '%s' was not found\n", preset[:len(preset)-4])
