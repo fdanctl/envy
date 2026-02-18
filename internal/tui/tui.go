@@ -2,11 +2,14 @@ package tui
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -18,11 +21,28 @@ type presetKV struct {
 	kv   [][]string
 }
 
+type state = int8
+
+type (
+	errMsg error
+)
+
+const (
+	normal state = iota
+	confirmation
+	nameInput
+	editing
+)
+
 type model struct {
-	presets []presetKV
-	cursor  int
-	width   int
-	height  int
+	state       state
+	editingFile string
+	presets     []presetKV
+	cursor      int
+	textInput   textinput.Model
+	textArea    textarea.Model
+	width       int
+	height      int
 }
 
 var (
@@ -69,11 +89,18 @@ func InitialModel() *model {
 		presets[i] = presetKV{name: name, kv: kvArr}
 	}
 
+	ti := textinput.New()
+	ti.Width = 20
+
+	ta := textarea.New()
+
 	return &model{
-		presets: presets,
-		cursor:  0,
-		width:   0,
-		height:  0,
+		presets:   presets,
+		textInput: ti,
+		textArea:  ta,
+		cursor:    0,
+		width:     0,
+		height:    0,
 	}
 }
 
@@ -82,28 +109,103 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
+		switch m.state {
+		case normal:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
 
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+
+			case "down", "j":
+				if m.cursor < len(m.presets)-1 {
+					m.cursor++
+				}
+
+			case "a":
+				m.textInput.Reset()
+				m.textInput.Prompt = "New name: "
+				m.state = nameInput
+				return m, m.textInput.Focus()
+
+			case "e":
+				m.textArea.Reset()
+				m.state = editing
+				m.editingFile = m.presets[m.cursor].name
+				return m, m.textArea.Focus()
+
+			case "d":
+				m.textInput.Reset()
+				m.textInput.Prompt = fmt.Sprintf(
+					"Do want to remove %s (y/n)? ",
+					m.presets[m.cursor].name,
+				)
+				m.state = confirmation
+				return m, m.textInput.Focus()
+
+			case "c":
+				// copy (confirmation)
+
+			case "l":
+				// link (confirmation)
 			}
 
-		case "down", "j":
-			if m.cursor < len(m.presets)-1 {
-				m.cursor++
+		case nameInput:
+			switch msg.String() {
+			case "enter":
+				m.state = normal
+				m.textInput.Blur()
+				// check if file name exist
+				// open textArea
+
+			case "ctrl+c", "esc":
+				m.state = normal
+				m.textInput.Blur()
+			}
+
+		case editing:
+			switch msg.String() {
+			case "ctrl+s":
+				m.state = normal
+				// save file
+
+			case "ctrl+c", "esc":
+				m.state = normal
+			}
+
+		case confirmation:
+			switch msg.String() {
+			case "enter":
+				if m.textInput.Value() == "n" {
+					m.state = normal
+				}
+				if m.textInput.Value() != "y" {
+					m.textInput.Reset()
+					return m, nil
+				}
+				// do action
+
+			case "ctrl+c", "esc":
+				m.state = normal
 			}
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+	case errMsg:
+		return m, nil
 	}
 
-	return m, nil
+	m.textInput, cmd = m.textInput.Update(msg)
+	m.textArea, cmd = m.textArea.Update(msg)
+	return m, cmd
 }
 
 func (m model) View() string {
@@ -123,36 +225,41 @@ func (m model) View() string {
 		left.WriteString("\n")
 	}
 
-	// var right strings.Builder
-	rows := m.presets[m.cursor].kv
+	var right strings.Builder
+	if m.state == editing {
+		right.WriteString(m.textArea.View())
+	} else {
+		rows := m.presets[m.cursor].kv
+		t := table.New().
+			Border(lipgloss.NormalBorder()).
+			BorderColumn(true).
+			StyleFunc(func(row, col int) lipgloss.Style {
+				if row == table.HeaderRow {
+					return tableHeaderStyle
+				}
+				if col == 0 {
+					return lipgloss.NewStyle().
+						Align(lipgloss.Right).
+						Foreground(keyColor)
+				}
+				if len(rows[row]) > 1 {
+					v := rows[row][1]
+					_, err := strconv.Atoi(v)
+					if err == nil {
+						return lipgloss.NewStyle().Foreground(numberColor)
+					}
+					_, err = strconv.ParseBool(v)
+					if err == nil {
+						return lipgloss.NewStyle().Foreground(boolColor)
+					}
+				}
+				return lipgloss.NewStyle().Foreground(stringColor)
+			}).
+			Headers("KEY", "VALUE").
+			Rows(rows...)
 
-	right := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderColumn(true).
-		StyleFunc(func(row, col int) lipgloss.Style {
-			if row == table.HeaderRow {
-				return tableHeaderStyle
-			}
-			if col == 0 {
-				return lipgloss.NewStyle().
-					Align(lipgloss.Right).
-					Foreground(keyColor)
-			}
-			if len(rows[row]) > 1 {
-				v := rows[row][1]
-				_, err := strconv.Atoi(v)
-				if err == nil {
-					return lipgloss.NewStyle().Foreground(numberColor)
-				}
-				_, err = strconv.ParseBool(v)
-				if err == nil {
-					return lipgloss.NewStyle().Foreground(boolColor)
-				}
-			}
-			return lipgloss.NewStyle().Foreground(stringColor)
-		}).
-		Headers("KEY", "VALUE").
-		Rows(rows...)
+		right.WriteString(t.String())
+	}
 
 	view.WriteString(
 		lipgloss.JoinHorizontal(
@@ -170,7 +277,42 @@ func (m model) View() string {
 		),
 	)
 
-	view.WriteString(footerStyle.Render("\nPress q to quit.\n"))
+	view.WriteString("\n")
+	switch m.state {
+	case nameInput, confirmation:
+		view.WriteString(m.textInput.View())
+
+	case editing:
+		view.WriteString(
+			lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				lipgloss.NewStyle().
+					Width(m.width/2).
+					Render(
+						"",
+					),
+				lipgloss.NewStyle().
+					Width(m.width/4).
+					Render(
+						" "+m.editingFile,
+					),
+				footerStyle.
+					Width(m.width/4).
+					Align(lipgloss.Right).
+					Render(
+						"ctrl+s: save ・ esc: cancel ",
+					),
+			),
+		)
+
+	default:
+		view.WriteString(
+			footerStyle.Render(
+				"j/k: up/down ・ a: add preset ・ e: edit preset ・ d: delete preset ・ c: copy preset to current folder ・ l: link preset to current folder\n",
+			),
+		)
+	}
+
 	return lipgloss.NewStyle().
 		Margin(0, 0).
 		Align(lipgloss.Top).
