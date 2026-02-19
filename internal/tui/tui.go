@@ -298,10 +298,14 @@ func (m model) View() string {
 		left.WriteString("\n")
 	}
 
+	if len(m.presets) == 0 {
+		left.WriteString(footerStyle.Render("no presets yet. add one"))
+	}
+
 	var right strings.Builder
 	if m.state == editing {
 		right.WriteString(m.textArea.View())
-	} else {
+	} else if len(m.presets) > 0 {
 		rows := m.presets[m.cursor].kv
 		t := table.New().
 			Border(lipgloss.NormalBorder()).
