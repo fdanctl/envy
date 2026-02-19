@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -23,10 +24,6 @@ type presetKV struct {
 
 type state = int8
 
-type (
-	errMsg error
-)
-
 const (
 	normal state = iota
 	confirmation
@@ -36,8 +33,10 @@ const (
 
 type model struct {
 	state       state
+	action      tea.Cmd
 	editingFile string
 	presets     []presetKV
+	footer      string
 	cursor      int
 	textInput   textinput.Model
 	textArea    textarea.Model
@@ -52,6 +51,8 @@ var (
 	stringColor = lipgloss.Color("#98BB6C")
 	keyColor    = lipgloss.Color("#E6C384")
 	boolColor   = lipgloss.Color("#FFA066")
+	redColor    = lipgloss.Color("#E63946")
+	sandColor   = lipgloss.Color("#C1B070")
 
 	titleStyle = lipgloss.NewStyle().
 			Width(30).
@@ -67,6 +68,10 @@ var (
 	tableHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(purple)
+)
+
+var INSTRUCTIONS = footerStyle.Render(
+	"j/k: up/down ・ a: add preset ・ e: edit preset ・ d: delete preset ・ u: use preset(copy)\n",
 )
 
 func InitialModel() *model {
@@ -86,7 +91,8 @@ func InitialModel() *model {
 			line := scanner.Text()
 			kvArr = append(kvArr, strings.Split(line, "="))
 		}
-		presets[i] = presetKV{name: name, kv: kvArr}
+		index := len(name) - len(".env")
+		presets[i] = presetKV{name: name[:index], kv: kvArr}
 	}
 
 	ti := textinput.New()
@@ -99,6 +105,7 @@ func InitialModel() *model {
 		textInput: ti,
 		textArea:  ta,
 		cursor:    0,
+		footer:    INSTRUCTIONS,
 		width:     0,
 		height:    0,
 	}
@@ -112,6 +119,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		m.footer = INSTRUCTIONS
 		switch m.state {
 		case normal:
 			switch msg.String() {
@@ -138,6 +146,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textArea.Reset()
 				m.state = editing
 				m.editingFile = m.presets[m.cursor].name
+
+				m.textArea.SetValue(getFileContent(m.editingFile))
+
 				return m, m.textArea.Focus()
 
 			case "d":
@@ -146,11 +157,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"Do want to remove %s (y/n)? ",
 					m.presets[m.cursor].name,
 				)
+				path := store.GetPresetsFolderPath() + m.presets[m.cursor].name + ".env"
+				m.action = removeFile(path)
 				m.state = confirmation
 				return m, m.textInput.Focus()
 
-			case "c":
-				// copy (confirmation)
+			case "u":
+				path := store.GetPresetsFolderPath() + m.presets[m.cursor].name + ".env"
+				if _, err := os.Stat(".env"); err == nil {
+					m.textInput.Reset()
+					m.textInput.Prompt = "Found a .env in this folder. Do you want to remove it (y/n)? "
+					m.state = confirmation
+					m.action = copyFile(path, ".env")
+					return m, m.textInput.Focus()
+				}
 
 			case "l":
 				// link (confirmation)
@@ -159,10 +179,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case nameInput:
 			switch msg.String() {
 			case "enter":
-				m.state = normal
 				m.textInput.Blur()
-				// check if file name exist
-				// open textArea
+				path := store.GetPresetsFolderPath() + m.textInput.Value() + ".env"
+				m.editingFile = m.textInput.Value()
+				return m, presetExists(path)
 
 			case "ctrl+c", "esc":
 				m.state = normal
@@ -173,7 +193,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "ctrl+s":
 				m.state = normal
-				// save file
+				return m, saveFile(m.editingFile, m.textArea.Value())
 
 			case "ctrl+c", "esc":
 				m.state = normal
@@ -184,12 +204,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.textInput.Value() == "n" {
 					m.state = normal
+					return m, nil
 				}
 				if m.textInput.Value() != "y" {
 					m.textInput.Reset()
 					return m, nil
 				}
-				// do action
+				m.textInput.Reset()
+				return m, m.action
 
 			case "ctrl+c", "esc":
 				m.state = normal
@@ -198,6 +220,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+	case someMsg:
+		if msg.success && msg.data == "remove" {
+			i := m.cursor
+			m.presets = append(m.presets[:i], m.presets[i+1:]...)
+			if m.cursor >= len(m.presets) {
+				m.cursor = len(m.presets) - 1
+			}
+		} else if msg.success && msg.data == "add" {
+			m.textArea.Reset()
+			m.state = editing
+			return m, m.textArea.Focus()
+		} else if msg.success && msg.data == "file created" {
+			kvArr := make([][]string, 0)
+			path := store.GetPresetsFolderPath() + m.editingFile + ".env"
+			f, err := os.Open(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := scanner.Text()
+				kvArr = append(kvArr, strings.Split(line, "="))
+			}
+
+			var exists bool
+			for i, v := range m.presets {
+				if v.name == m.editingFile {
+					exists = true
+					m.presets[i] = presetKV{name: v.name, kv: kvArr}
+				}
+			}
+
+			if !exists {
+				m.presets = append(m.presets, presetKV{
+					name: m.editingFile,
+					kv:   kvArr,
+				})
+				sort.Slice(m.presets, func(i, j int) bool {
+					return m.presets[i].name < m.presets[j].name
+				})
+			}
+			m.footer = lipgloss.NewStyle().Foreground(sandColor).Render(msg.data)
+		} else if msg.success {
+			m.footer = lipgloss.NewStyle().Foreground(sandColor).Render(msg.data)
+		} else if !msg.success {
+			m.footer = lipgloss.NewStyle().Foreground(redColor).Render(msg.data)
+		}
+		m.state = normal
+		m.action = nil
+		return m, nil
 
 	case errMsg:
 		return m, nil
@@ -307,9 +380,7 @@ func (m model) View() string {
 
 	default:
 		view.WriteString(
-			footerStyle.Render(
-				"j/k: up/down ・ a: add preset ・ e: edit preset ・ d: delete preset ・ c: copy preset to current folder ・ l: link preset to current folder\n",
-			),
+			m.footer,
 		)
 	}
 
